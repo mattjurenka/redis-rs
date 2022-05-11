@@ -3,4 +3,4 @@ target: parser
 duration: 90
 
 cmds:
-    - cmd: /fuzz-target
+    - cmd: /parser
