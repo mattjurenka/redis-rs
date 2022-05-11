@@ -1,0 +1,6 @@
+project: redis-rs
+target: parser
+duration: 90
+
+cmds:
+    - cmd: /fuzz-target
