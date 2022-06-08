@@ -3,7 +3,7 @@
 use crate::cmd::{cmd, Cmd, Iter};
 use crate::connection::{Connection, ConnectionLike, Msg};
 use crate::pipeline::Pipeline;
-use crate::types::{FromRedisValue, NumericBehavior, RedisResult, ToRedisArgs, RedisWrite};
+use crate::types::{FromRedisValue, NumericBehavior, RedisResult, ToRedisArgs, RedisWrite, Expiry};
 
 #[cfg(feature = "cluster")]
 use crate::cluster_pipeline::ClusterPipeline;
@@ -397,6 +397,24 @@ implement_commands! {
         cmd("PTTL").arg(key)
     }
 
+    /// Get the value of a key and set expiration
+    fn get_ex<K: ToRedisArgs>(key: K, expire_at: Expiry) {
+        let (option, time_arg) = match expire_at {
+            Expiry::EX(sec) => ("EX", Some(sec)),
+            Expiry::PX(ms) => ("PX", Some(ms)),
+            Expiry::EXAT(timestamp_sec) => ("EXAT", Some(timestamp_sec)),
+            Expiry::PXAT(timestamp_ms) => ("PXAT", Some(timestamp_ms)),
+            Expiry::PERSIST => ("PERSIST", None),
+        };
+
+        cmd("GETEX").arg(key).arg(option).arg(time_arg)
+    }
+
+    /// Get the value of a key and delete it
+    fn get_del<K: ToRedisArgs>(key: K) {
+        cmd("GETDEL").arg(key)
+    }
+
     /// Rename a key.
     fn rename<K: ToRedisArgs>(key: K, new_key: K) {
         cmd("RENAME").arg(key).arg(new_key)
@@ -545,14 +563,14 @@ implement_commands! {
     }
 
     // list operations
-    
+
     /// Pop an element from a list, push it to another list
     /// and return it; or block until one is available
     fn blmove<K: ToRedisArgs>(srckey: K, dstkey: K, src_dir: Direction, dst_dir: Direction, timeout: usize) {
         cmd("BLMOVE").arg(srckey).arg(dstkey).arg(src_dir).arg(dst_dir).arg(timeout)
     }
 
-    /// Pops `count` elements from the first non-empty list key from the list of 
+    /// Pops `count` elements from the first non-empty list key from the list of
     /// provided key names; or blocks until one is available.
     fn blmpop<K: ToRedisArgs>(timeout: usize, numkeys: usize, key: K, dir: Direction, count: usize){
         cmd("BLMPOP").arg(timeout).arg(numkeys).arg(key).arg(dir).arg("COUNT").arg(count)
@@ -601,7 +619,7 @@ implement_commands! {
         cmd("LMOVE").arg(srckey).arg(dstkey).arg(src_dir).arg(dst_dir)
     }
 
-    /// Pops `count` elements from the first non-empty list key from the list of 
+    /// Pops `count` elements from the first non-empty list key from the list of
     /// provided key names.
     fn lmpop<K: ToRedisArgs>( numkeys: usize, key: K, dir: Direction, count: usize) {
         cmd("LMPOP").arg(numkeys).arg(key).arg(dir).arg("COUNT").arg(count)
@@ -813,6 +831,18 @@ implement_commands! {
         cmd("ZPOPMIN").arg(key).arg(count)
     }
 
+    /// Removes and returns up to count members with the highest scores, 
+    /// from the first non-empty sorted set in the provided list of key names.
+    fn zmpop_max<K: ToRedisArgs>(keys: &'a [K], count: isize) {
+        cmd("ZMPOP").arg(keys.len()).arg(keys).arg("MAX").arg("COUNT").arg(count)
+    }
+
+    /// Removes and returns up to count members with the lowest scores, 
+    /// from the first non-empty sorted set in the provided list of key names.
+    fn zmpop_min<K: ToRedisArgs>(keys: &'a [K], count: isize) {
+        cmd("ZMPOP").arg(keys.len()).arg(keys).arg("MIN").arg("COUNT").arg(count)
+    }
+
     /// Return up to count random members in a sorted set (or 1 if `count == None`)
     fn zrandmember<K: ToRedisArgs>(key: K, count: Option<isize>) {
         cmd("ZRANDMEMBER").arg(key).arg(count)
@@ -994,6 +1024,28 @@ implement_commands! {
     /// Posts a message to the given channel.
     fn publish<K: ToRedisArgs, E: ToRedisArgs>(channel: K, message: E) {
         cmd("PUBLISH").arg(channel).arg(message)
+    }
+
+    // Object commands
+
+    /// Returns the encoding of a key.
+    fn object_encoding<K: ToRedisArgs>(key: K) {
+        cmd("OBJECT").arg("ENCODING").arg(key)
+    }
+
+    /// Returns the time in seconds since the last access of a key.
+    fn object_idletime<K: ToRedisArgs>(key: K) {
+        cmd("OBJECT").arg("IDLETIME").arg(key)
+    }
+
+    /// Returns the logarithmic access frequency counter of a key.
+    fn object_freq<K: ToRedisArgs>(key: K) {
+        cmd("OBJECT").arg("FREQ").arg(key)
+    }
+
+    /// Returns the reference count of a key.
+    fn object_refcount<K: ToRedisArgs>(key: K) {
+        cmd("OBJECT").arg("REFCOUNT").arg(key)
     }
 
     // ACL commands
@@ -2088,9 +2140,7 @@ impl PubSubCommands for Connection {
     }
 }
 
-/// Options for the [LPOS] command
-///
-/// https://redis.io/commands/lpos
+/// Options for the [LPOS](https://redis.io/commands/lpos) command
 ///
 /// # Example
 ///

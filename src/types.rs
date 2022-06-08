@@ -25,6 +25,20 @@ macro_rules! invalid_type_error_inner {
     };
 }
 
+/// Helper enum that is used to define expiry time
+pub enum Expiry {
+    /// EX seconds -- Set the specified expire time, in seconds.
+    EX(usize),
+    /// PX milliseconds -- Set the specified expire time, in milliseconds.
+    PX(usize),
+    /// EXAT timestamp-seconds -- Set the specified Unix time at which the key will expire, in seconds.
+    EXAT(usize),
+    /// PXAT timestamp-milliseconds -- Set the specified Unix time at which the key will expire, in milliseconds.
+    PXAT(usize),
+    /// PERSIST -- Remove the time to live associated with the key.
+    PERSIST,
+}
+
 /// Helper enum that is used in some situations to describe
 /// the behavior of arguments in a numeric context.
 #[derive(PartialEq, Eq, Clone, Debug, Copy)]
@@ -364,7 +378,7 @@ impl RedisError {
             ErrorKind::MasterDown => Some("MASTERDOWN"),
             ErrorKind::ReadOnly => Some("READONLY"),
             _ => match self.repr {
-                ErrorRepr::ExtensionError(ref code, _) => Some(&code),
+                ErrorRepr::ExtensionError(ref code, _) => Some(code),
                 _ => None,
             },
         }
@@ -479,7 +493,7 @@ impl RedisError {
     #[deprecated(note = "use code() instead")]
     pub fn extension_error_code(&self) -> Option<&str> {
         match self.repr {
-            ErrorRepr::ExtensionError(ref code, _) => Some(&code),
+            ErrorRepr::ExtensionError(ref code, _) => Some(code),
             _ => None,
         }
     }
@@ -574,7 +588,7 @@ impl InfoDict {
     /// Typical types are `String`, `bool` and integer types.
     pub fn get<T: FromRedisValue>(&self, key: &str) -> Option<T> {
         match self.find(&key) {
-            Some(ref x) => from_redis_value(*x).ok(),
+            Some(x) => from_redis_value(x).ok(),
             None => None,
         }
     }
@@ -607,7 +621,7 @@ pub trait RedisWrite {
 
     /// Accepts a serialized redis command.
     fn write_arg_fmt(&mut self, arg: impl fmt::Display) {
-        self.write_arg(&arg.to_string().as_bytes())
+        self.write_arg(arg.to_string().as_bytes())
     }
 }
 
@@ -1014,10 +1028,7 @@ pub trait FromRedisValue: Sized {
     /// from another vector of values.  This primarily exists internally
     /// to customize the behavior for vectors of tuples.
     fn from_redis_values(items: &[Value]) -> RedisResult<Vec<Self>> {
-        Ok(items
-            .iter()
-            .filter_map(|item| FromRedisValue::from_redis_value(item).ok())
-            .collect())
+        items.iter().map(FromRedisValue::from_redis_value).collect()
     }
 
     /// This only exists internally as a workaround for the lack of
@@ -1266,7 +1277,7 @@ impl FromRedisValue for InfoDict {
 
 impl<T: FromRedisValue> FromRedisValue for Option<T> {
     fn from_redis_value(v: &Value) -> RedisResult<Option<T>> {
-        if let Value::Nil = *v {
+        if *v == Value::Nil {
             return Ok(None);
         }
         Ok(Some(from_redis_value(v)?))

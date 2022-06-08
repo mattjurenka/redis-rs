@@ -3,3 +3,5 @@ lib
 target
 .rust
 fuzz/target
+Cargo.lock
+

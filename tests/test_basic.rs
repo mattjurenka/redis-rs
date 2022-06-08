@@ -1,7 +1,8 @@
 #![allow(clippy::let_unit_value)]
 
 use redis::{
-    Commands, ConnectionInfo, ConnectionLike, ControlFlow, ErrorKind, PubSubCommands, RedisResult,
+    Commands, ConnectionInfo, ConnectionLike, ControlFlow, ErrorKind, Expiry, PubSubCommands,
+    RedisResult,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -62,6 +63,55 @@ fn test_incr() {
 
     redis::cmd("SET").arg("foo").arg(42).execute(&mut con);
     assert_eq!(redis::cmd("INCR").arg("foo").query(&mut con), Ok(43usize));
+}
+
+#[test]
+fn test_getdel() {
+    let ctx = TestContext::new();
+    let mut con = ctx.connection();
+
+    redis::cmd("SET").arg("foo").arg(42).execute(&mut con);
+
+    assert_eq!(con.get_del("foo"), Ok(42usize));
+
+    assert_eq!(
+        redis::cmd("GET").arg("foo").query(&mut con),
+        Ok(None::<usize>)
+    );
+}
+
+#[test]
+fn test_getex() {
+    let ctx = TestContext::new();
+    let mut con = ctx.connection();
+
+    redis::cmd("SET").arg("foo").arg(42usize).execute(&mut con);
+
+    // Return of get_ex must match set value
+    let ret_value = con.get_ex::<_, usize>("foo", Expiry::EX(1)).unwrap();
+    assert_eq!(ret_value, 42usize);
+
+    // Get before expiry time must also return value
+    sleep(Duration::from_millis(100));
+    let delayed_get = con.get::<_, usize>("foo").unwrap();
+    assert_eq!(delayed_get, 42usize);
+
+    // Get after expiry time mustn't return value
+    sleep(Duration::from_secs(1));
+    let after_expire_get = con.get::<_, Option<usize>>("foo").unwrap();
+    assert_eq!(after_expire_get, None);
+
+    // Persist option test prep
+    redis::cmd("SET").arg("foo").arg(420usize).execute(&mut con);
+
+    // Return of get_ex with persist option must match set value
+    let ret_value = con.get_ex::<_, usize>("foo", Expiry::PERSIST).unwrap();
+    assert_eq!(ret_value, 420usize);
+
+    // Get after persist get_ex must return value
+    sleep(Duration::from_millis(200));
+    let delayed_get = con.get::<_, usize>("foo").unwrap();
+    assert_eq!(delayed_get, 420usize);
 }
 
 #[test]
@@ -129,22 +179,20 @@ fn test_set_ops() {
     let ctx = TestContext::new();
     let mut con = ctx.connection();
 
-    redis::cmd("SADD").arg("foo").arg(1).execute(&mut con);
-    redis::cmd("SADD").arg("foo").arg(2).execute(&mut con);
-    redis::cmd("SADD").arg("foo").arg(3).execute(&mut con);
+    assert_eq!(con.sadd("foo", &[1, 2, 3]), Ok(3));
 
-    let mut s: Vec<i32> = redis::cmd("SMEMBERS").arg("foo").query(&mut con).unwrap();
+    let mut s: Vec<i32> = con.smembers("foo").unwrap();
     s.sort_unstable();
     assert_eq!(s.len(), 3);
     assert_eq!(&s, &[1, 2, 3]);
 
-    let set: HashSet<i32> = redis::cmd("SMEMBERS").arg("foo").query(&mut con).unwrap();
+    let set: HashSet<i32> = con.smembers("foo").unwrap();
     assert_eq!(set.len(), 3);
     assert!(set.contains(&1i32));
     assert!(set.contains(&2i32));
     assert!(set.contains(&3i32));
 
-    let set: BTreeSet<i32> = redis::cmd("SMEMBERS").arg("foo").query(&mut con).unwrap();
+    let set: BTreeSet<i32> = con.smembers("foo").unwrap();
     assert_eq!(set.len(), 3);
     assert!(set.contains(&1i32));
     assert!(set.contains(&2i32));
@@ -156,9 +204,7 @@ fn test_scan() {
     let ctx = TestContext::new();
     let mut con = ctx.connection();
 
-    redis::cmd("SADD").arg("foo").arg(1).execute(&mut con);
-    redis::cmd("SADD").arg("foo").arg(2).execute(&mut con);
-    redis::cmd("SADD").arg("foo").arg(3).execute(&mut con);
+    assert_eq!(con.sadd("foo", &[1, 2, 3]), Ok(3));
 
     let (cur, mut s): (i32, Vec<i32>) = redis::cmd("SSCAN")
         .arg("foo")
@@ -235,12 +281,12 @@ fn test_filtered_scanning() {
         }
     }
 
-    let iter = con.hscan_match("foo", "key_0_*").unwrap();
+    let iter = con
+        .hscan_match::<&str, &str, (String, usize)>("foo", "key_0_*")
+        .unwrap();
 
-    for x in iter {
-        // type inference limitations
-        let x: usize = x;
-        unseen.remove(&x);
+    for (_field, value) in iter {
+        unseen.remove(&value);
     }
 
     assert_eq!(unseen.len(), 0);
@@ -440,7 +486,7 @@ fn test_pipeline_reuse_query_clear() {
         .unwrap();
     pl.clear();
 
-    assert_eq!(k1, false);
+    assert!(!k1);
     assert_eq!(k2, 45);
 }
 
@@ -865,23 +911,21 @@ fn test_zrembylex() {
     let ctx = TestContext::new();
     let mut con = ctx.connection();
 
-    let mut c = redis::cmd("ZADD");
     let setname = "myzset";
-    c.arg(setname)
-        .arg(0)
-        .arg("apple")
-        .arg(0)
-        .arg("banana")
-        .arg(0)
-        .arg("carrot")
-        .arg(0)
-        .arg("durian")
-        .arg(0)
-        .arg("eggplant")
-        .arg(0)
-        .arg("grapes");
-
-    c.query::<()>(&mut con).unwrap();
+    assert_eq!(
+        con.zadd_multiple(
+            setname,
+            &[
+                (0, "apple"),
+                (0, "banana"),
+                (0, "carrot"),
+                (0, "durian"),
+                (0, "eggplant"),
+                (0, "grapes"),
+            ],
+        ),
+        Ok(6)
+    );
 
     // Will remove "banana", "carrot", "durian" and "eggplant"
     let num_removed: u32 = con.zrembylex(setname, "[banana", "[eggplant").unwrap();
@@ -913,18 +957,13 @@ fn test_zrandmember() {
     assert_eq!(result.len(), 1);
     assert_eq!(result[0], "one".to_string());
 
-    let mut c = redis::cmd("ZADD");
-    c.arg(setname)
-        .arg(2)
-        .arg("two")
-        .arg(3)
-        .arg("three")
-        .arg(4)
-        .arg("four")
-        .arg(5)
-        .arg("five");
-
-    c.query::<()>(&mut con).unwrap();
+    assert_eq!(
+        con.zadd_multiple(
+            setname,
+            &[(2, "two"), (3, "three"), (4, "four"), (5, "five")]
+        ),
+        Ok(4)
+    );
 
     let results: Vec<String> = con.zrandmember(setname, Some(5)).unwrap();
     assert_eq!(results.len(), 5);
@@ -937,4 +976,39 @@ fn test_zrandmember() {
 
     let results: Vec<String> = con.zrandmember_withscores(setname, -5).unwrap();
     assert_eq!(results.len(), 10);
+}
+
+#[test]
+fn test_object_commands() {
+    let ctx = TestContext::new();
+    let mut con = ctx.connection();
+
+    let _: () = con.set("object_key_str", "object_value_str").unwrap();
+    let _: () = con.set("object_key_int", 42).unwrap();
+
+    assert_eq!(
+        con.object_encoding::<_, String>("object_key_str").unwrap(),
+        "embstr"
+    );
+
+    assert_eq!(
+        con.object_encoding::<_, String>("object_key_int").unwrap(),
+        "int"
+    );
+
+    assert_eq!(con.object_idletime::<_, i32>("object_key_str").unwrap(), 0);
+    assert_eq!(con.object_refcount::<_, i32>("object_key_str").unwrap(), 1);
+
+    // Needed for OBJECT FREQ and can't be set before object_idletime
+    // since that will break getting the idletime before idletime adjuts
+    redis::cmd("CONFIG")
+        .arg("SET")
+        .arg(b"maxmemory-policy")
+        .arg("allkeys-lfu")
+        .execute(&mut con);
+
+    let _: () = con.get("object_key_str").unwrap();
+    // since maxmemory-policy changed, freq should reset to 1 since we only called
+    // get after that
+    assert_eq!(con.object_freq::<_, i32>("object_key_str").unwrap(), 1);
 }
